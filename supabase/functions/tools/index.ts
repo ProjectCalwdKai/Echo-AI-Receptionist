@@ -125,6 +125,8 @@ async function bookingCreateDbOnly(supabase: ReturnType<typeof getServiceClient>
   const record = {
     tenant_id: tenantId,
     location_id: null,
+    service_name: args?.service_name ?? null,
+    notes: args?.notes ?? null,
     start_at: start,
     end_at: end,
     calendar_provider: null,
@@ -154,7 +156,7 @@ async function bookingLookup(supabase: ReturnType<typeof getServiceClient>, tena
 
   const { data, error } = await supabase
     .from("bookings")
-    .select("id,start_at,end_at,status,customer_phone,customer_name")
+    .select("id,start_at,end_at,status,service_name,customer_phone,customer_name")
     .eq("tenant_id", tenantId)
     .eq("customer_phone", phone)
     .order("start_at", { ascending: false })
@@ -166,7 +168,7 @@ async function bookingLookup(supabase: ReturnType<typeof getServiceClient>, tena
 
   // Single-line summary
   const summary = data
-    .map((b: any) => `bookingId=${b.id} start=${b.start_at} status=${b.status}`)
+    .map((b: any) => `bookingId=${b.id} start=${b.start_at} service=${b.service_name ?? 'n/a'} status=${b.status}`)
     .join(" | ");
 
   return { ok: true, result: summary };
