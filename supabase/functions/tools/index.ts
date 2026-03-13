@@ -138,6 +138,15 @@ Deno.serve(async (req) => {
       });
     }
 
+    // Log every inbound tool call for debugging/audit
+    await supabase.from('tool_calls').insert({
+      tenant_id: tenantId,
+      vapi_call_id: callId ?? null,
+      assistant_id: assistantId ?? null,
+      tool_name: toolName ?? null,
+      payload,
+    });
+
     // Route
     switch (toolName) {
       case "lead.createCallbackRequest":
