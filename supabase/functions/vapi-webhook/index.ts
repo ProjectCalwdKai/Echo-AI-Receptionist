@@ -120,7 +120,7 @@ Deno.serve(async (req) => {
 
     const tenantId = await getOrCreateTenantForAssistant(supabase, vapiAssistantId);
 
-    // Upsert call with raw transcript payload stored in jsonb.
+    // Upsert call with raw payload stored in jsonb (note: overwritten per event).
     const now = new Date().toISOString();
     const { error: upsertErr } = await supabase
       .from('calls')
@@ -134,6 +134,32 @@ Deno.serve(async (req) => {
       }, { onConflict: 'vapi_call_id' });
 
     if (upsertErr) throw upsertErr;
+
+    // If this is a tool-calls event, persist relevant tool actions (starting with callback leads)
+    const msg = payload?.message;
+    if (msg?.type === 'tool-calls' && Array.isArray(msg?.toolCalls)) {
+      for (const tc of msg.toolCalls) {
+        const fn = tc?.function;
+        const name = (fn?.name ?? '').toLowerCase().replace(/[^a-z0-9]/g, '');
+        const args = fn?.arguments ?? {};
+
+        if (name === 'leadcreatecallbackrequest') {
+          const phone = args.phone ?? null;
+          const reason = args.reason ?? null;
+          const preferred = args.preferred_time_window ?? args.preferred_time ?? null;
+
+          if (phone && reason) {
+            await supabase.from('leads').insert({
+              tenant_id: tenantId,
+              phone,
+              reason,
+              preferred_time: preferred,
+              details_json: { source: 'vapi-tool-calls', toolCallId: tc?.id ?? null },
+            });
+          }
+        }
+      }
+    }
 
     return new Response(JSON.stringify({ ok: true }), {
       headers: { 'content-type': 'application/json' },
