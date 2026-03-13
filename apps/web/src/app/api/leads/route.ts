@@ -1,7 +1,12 @@
 import { NextResponse } from 'next/server';
 import { supabaseAdmin } from '../../../lib/supabaseAdmin';
+import { createSupabaseServerClient } from '../../../lib/supabase/server';
 
 export async function GET() {
+  const supabase = createSupabaseServerClient();
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) return NextResponse.json({ ok: false, error: 'unauthorized' }, { status: 401 });
+
   const { data, error } = await supabaseAdmin
     .from('leads')
     .select('id, created_at, tenant_id, name, phone, email, reason, urgency, preferred_time, status')
