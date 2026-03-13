@@ -68,6 +68,143 @@ async function resolveTenantId(supabase: ReturnType<typeof getServiceClient>, as
   return (data?.tenant_id as string | undefined) ?? undefined;
 }
 
+async function getGoogleAccessToken(supabase: ReturnType<typeof getServiceClient>, tenantId: string): Promise<string> {
+  const clientId = Deno.env.get('GOOGLE_OAUTH_CLIENT_ID');
+  const clientSecret = Deno.env.get('GOOGLE_OAUTH_CLIENT_SECRET');
+  if (!clientId || !clientSecret) throw new Error('Google OAuth secrets not set');
+
+  const { data: sec, error: secErr } = await supabase
+    .from('integration_secrets')
+    .select('encrypted_json')
+    .eq('tenant_id', tenantId)
+    .eq('provider', 'google_calendar')
+    .maybeSingle();
+  if (secErr) throw secErr;
+  if (!sec?.encrypted_json?.access_token) throw new Error('Google Calendar not connected for tenant');
+
+  let token = sec.encrypted_json.access_token as string;
+
+  // Verify token quickly; if unauthorized, refresh.
+  const test = await fetch('https://www.googleapis.com/oauth2/v1/tokeninfo?access_token=' + encodeURIComponent(token));
+  if (test.ok) return token;
+
+  const refreshToken = sec.encrypted_json.refresh_token as string | undefined;
+  if (!refreshToken) throw new Error('Missing refresh_token for Google Calendar integration');
+
+  const form = new URLSearchParams({
+    client_id: clientId,
+    client_secret: clientSecret,
+    refresh_token: refreshToken,
+    grant_type: 'refresh_token',
+  });
+
+  const r = await fetch('https://oauth2.googleapis.com/token', {
+    method: 'POST',
+    headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body: form,
+  });
+
+  const j = await r.json();
+  if (!r.ok || !j.access_token) throw new Error('Google token refresh failed');
+
+  token = j.access_token;
+  sec.encrypted_json.access_token = token;
+  await supabase
+    .from('integration_secrets')
+    .update({ encrypted_json: sec.encrypted_json, updated_at: new Date().toISOString() })
+    .eq('tenant_id', tenantId)
+    .eq('provider', 'google_calendar');
+
+  return token;
+}
+
+async function getGoogleCalendarId(supabase: ReturnType<typeof getServiceClient>, tenantId: string): Promise<string> {
+  const { data, error } = await supabase
+    .from('integrations')
+    .select('config_json')
+    .eq('tenant_id', tenantId)
+    .eq('provider', 'google_calendar')
+    .maybeSingle();
+  if (error) throw error;
+  const calendarId = data?.config_json?.calendar_id;
+  if (!calendarId) throw new Error('Google calendar_id not set for tenant');
+  return calendarId as string;
+}
+
+async function googleCreateEvent(opts: {
+  accessToken: string;
+  calendarId: string;
+  summary: string;
+  start: string;
+  end: string;
+  timeZone: string;
+  description?: string;
+}) {
+  const r = await fetch(`https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(opts.calendarId)}/events`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      Authorization: `Bearer ${opts.accessToken}`,
+    },
+    body: JSON.stringify({
+      summary: opts.summary,
+      description: opts.description ?? undefined,
+      start: { dateTime: opts.start, timeZone: opts.timeZone },
+      end: { dateTime: opts.end, timeZone: opts.timeZone },
+    }),
+  });
+
+  const j = await r.json();
+  if (!r.ok) throw new Error(`Google create event failed: ${JSON.stringify(j)}`);
+  return j;
+}
+
+async function googleUpdateEvent(opts: {
+  accessToken: string;
+  calendarId: string;
+  eventId: string;
+  start: string;
+  end: string;
+  timeZone: string;
+}) {
+  const r = await fetch(
+    `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(opts.calendarId)}/events/${encodeURIComponent(opts.eventId)}`,
+    {
+      method: 'PATCH',
+      headers: {
+        'content-type': 'application/json',
+        Authorization: `Bearer ${opts.accessToken}`,
+      },
+      body: JSON.stringify({
+        start: { dateTime: opts.start, timeZone: opts.timeZone },
+        end: { dateTime: opts.end, timeZone: opts.timeZone },
+      }),
+    },
+  );
+
+  const j = await r.json();
+  if (!r.ok) throw new Error(`Google update event failed: ${JSON.stringify(j)}`);
+  return j;
+}
+
+async function googleDeleteEvent(opts: {
+  accessToken: string;
+  calendarId: string;
+  eventId: string;
+}) {
+  const r = await fetch(
+    `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(opts.calendarId)}/events/${encodeURIComponent(opts.eventId)}`,
+    {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${opts.accessToken}` },
+    },
+  );
+  if (r.status !== 204 && !r.ok) {
+    const t = await r.text();
+    throw new Error(`Google delete event failed: ${t}`);
+  }
+}
+
 async function logToolCall(supabase: ReturnType<typeof getServiceClient>, tenantId: string, tc: any, meta?: any) {
   await supabase.from("tool_calls").insert({
     tenant_id: tenantId,
@@ -122,6 +259,22 @@ async function bookingCreateDbOnly(supabase: ReturnType<typeof getServiceClient>
     return { ok: false, error: "Missing required fields: start_datetime, end_datetime, customer.phone" };
   }
 
+  const timeZone = args?.timezone ?? 'Europe/London';
+  const summary = args?.service_name ?? 'Appointment';
+
+  // Google Calendar mirroring
+  const accessToken = await getGoogleAccessToken(supabase, tenantId);
+  const calendarId = await getGoogleCalendarId(supabase, tenantId);
+  const ev = await googleCreateEvent({
+    accessToken,
+    calendarId,
+    summary,
+    start,
+    end,
+    timeZone,
+    description: args?.notes ?? undefined,
+  });
+
   const record = {
     tenant_id: tenantId,
     location_id: null,
@@ -129,25 +282,25 @@ async function bookingCreateDbOnly(supabase: ReturnType<typeof getServiceClient>
     notes: args?.notes ?? null,
     start_at: start,
     end_at: end,
-    calendar_provider: null,
-    calendar_id: null,
-    calendar_event_id: null,
+    calendar_provider: 'google',
+    calendar_id: calendarId,
+    calendar_event_id: ev.id ?? null,
     customer_phone: phone,
     customer_name: customer?.name ?? null,
     customer_email: customer?.email ?? null,
     customer_json: customer,
-    status: "pending_calendar",
+    status: 'confirmed',
   };
 
   const { data, error } = await supabase
-    .from("bookings")
+    .from('bookings')
     .insert(record)
-    .select("id")
+    .select('id')
     .single();
 
   if (error) return { ok: false, error: `DB insert failed: ${error.message}` };
 
-  return { ok: true, result: `Booking created (bookingId=${data.id}, start=${start}, end=${end}, status=pending_calendar)` };
+  return { ok: true, result: `Booking created (bookingId=${data.id}, googleEventId=${ev.id}, start=${start}, end=${end})` };
 }
 
 async function bookingLookup(supabase: ReturnType<typeof getServiceClient>, tenantId: string, args: any) {
@@ -205,6 +358,23 @@ async function bookingCancelDbOnly(supabase: ReturnType<typeof getServiceClient>
   const id = await findBookingId(supabase, tenantId, args);
   if (!id) return { ok: false, error: 'Could not find booking to cancel. Ask for phone number and approximate date.' };
 
+  const { data: existing, error: exErr } = await supabase
+    .from('bookings')
+    .select('calendar_provider, calendar_id, calendar_event_id')
+    .eq('tenant_id', tenantId)
+    .eq('id', id)
+    .maybeSingle();
+  if (exErr) throw exErr;
+
+  if (existing?.calendar_provider === 'google' && existing?.calendar_id && existing?.calendar_event_id) {
+    const accessToken = await getGoogleAccessToken(supabase, tenantId);
+    await googleDeleteEvent({
+      accessToken,
+      calendarId: existing.calendar_id,
+      eventId: existing.calendar_event_id,
+    });
+  }
+
   const { error } = await supabase
     .from('bookings')
     .update({ status: 'cancelled' })
@@ -225,14 +395,27 @@ async function bookingRescheduleDbOnly(supabase: ReturnType<typeof getServiceCli
   if (!newStart || !newEnd) return { ok: false, error: 'Missing required fields: new_start_datetime, new_end_datetime' };
 
   const reason = args?.reason ?? null;
+  const timeZone = args?.timezone ?? 'Europe/London';
 
   const { data: existing, error: exErr } = await supabase
     .from('bookings')
-    .select('notes')
+    .select('notes, calendar_provider, calendar_id, calendar_event_id')
     .eq('tenant_id', tenantId)
     .eq('id', id)
     .maybeSingle();
   if (exErr) throw exErr;
+
+  if (existing?.calendar_provider === 'google' && existing?.calendar_id && existing?.calendar_event_id) {
+    const accessToken = await getGoogleAccessToken(supabase, tenantId);
+    await googleUpdateEvent({
+      accessToken,
+      calendarId: existing.calendar_id,
+      eventId: existing.calendar_event_id,
+      start: newStart,
+      end: newEnd,
+      timeZone,
+    });
+  }
 
   const notes = [existing?.notes, reason ? `Reschedule reason: ${reason}` : null].filter(Boolean).join(' | ') || null;
 
