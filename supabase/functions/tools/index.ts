@@ -131,6 +131,32 @@ async function getGoogleCalendarId(supabase: ReturnType<typeof getServiceClient>
   return calendarId as string;
 }
 
+async function googleFreeBusy(opts: {
+  accessToken: string;
+  calendarId: string;
+  timeMin: string;
+  timeMax: string;
+  timeZone: string;
+}): Promise<Array<{ start: string; end: string }>> {
+  const r = await fetch('https://www.googleapis.com/calendar/v3/freeBusy', {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      Authorization: `Bearer ${opts.accessToken}`,
+    },
+    body: JSON.stringify({
+      timeMin: opts.timeMin,
+      timeMax: opts.timeMax,
+      timeZone: opts.timeZone,
+      items: [{ id: opts.calendarId }],
+    }),
+  });
+
+  const j = await r.json();
+  if (!r.ok) throw new Error(`Google freeBusy failed: ${JSON.stringify(j)}`);
+  return j?.calendars?.[opts.calendarId]?.busy ?? [];
+}
+
 async function googleCreateEvent(opts: {
   accessToken: string;
   calendarId: string;
@@ -275,6 +301,30 @@ async function bookingCreateDbOnly(supabase: ReturnType<typeof getServiceClient>
   // Google Calendar mirroring
   const accessToken = await getGoogleAccessToken(supabase, tenantId);
   const calendarId = await getGoogleCalendarId(supabase, tenantId);
+
+  // Prevent double-bookings: check free/busy for the exact requested window.
+  const busy = await googleFreeBusy({ accessToken, calendarId, timeMin: start, timeMax: end, timeZone });
+  if (busy.length) {
+    // Suggest next available slots (30-min steps, next 8 hours)
+    const durMin = Math.max(5, Number(args?.duration_minutes ?? 30));
+    const stepMin = 30;
+    const startMs2 = new Date(start).getTime();
+    const windowEndMs = startMs2 + 8 * 60 * 60 * 1000;
+    const busyMs = busy.map((b) => ({ s: new Date(b.start).getTime(), e: new Date(b.end).getTime() }));
+    const overlaps = (s: number, e: number) => busyMs.some((b) => s < b.e && e > b.s);
+
+    const suggestions: string[] = [];
+    for (let t = startMs2; t < windowEndMs && suggestions.length < 3; t += stepMin * 60 * 1000) {
+      const s = t;
+      const e = t + durMin * 60 * 1000;
+      if (!overlaps(s, e)) suggestions.push(new Date(s).toISOString());
+    }
+
+    const busyStr = busy.slice(0, 3).map((b) => `${b.start}-${b.end}`).join(', ');
+    const sugStr = suggestions.length ? ` Next available starts: ${suggestions.join(', ')}` : '';
+    return { ok: false, error: `Requested time is not available. Busy: ${busyStr}.${sugStr}` };
+  }
+
   const ev = await googleCreateEvent({
     accessToken,
     calendarId,
@@ -363,31 +413,44 @@ async function bookingCheckAvailabilityGoogle(supabase: ReturnType<typeof getSer
   const accessToken = await getGoogleAccessToken(supabase, tenantId);
   const calendarId = await getGoogleCalendarId(supabase, tenantId);
 
-  const r = await fetch('https://www.googleapis.com/calendar/v3/freeBusy', {
-    method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-      Authorization: `Bearer ${accessToken}`,
-    },
-    body: JSON.stringify({
-      timeMin: start,
-      timeMax: end,
-      timeZone,
-      items: [{ id: calendarId }],
-    }),
-  });
-
-  const j = await r.json();
-  if (!r.ok) return { ok: false, error: `Google freeBusy failed: ${JSON.stringify(j)}` };
-
-  const busy: Array<{ start: string; end: string }> = j?.calendars?.[calendarId]?.busy ?? [];
+  let busy: Array<{ start: string; end: string }> = [];
+  try {
+    busy = await googleFreeBusy({ accessToken, calendarId, timeMin: start, timeMax: end, timeZone });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return { ok: false, error: msg };
+  }
 
   if (!busy.length) {
     return { ok: true, result: `Available between ${start} and ${end} (${timeZone})` };
   }
 
-  const ranges = busy.slice(0, 5).map((b) => `${b.start}-${b.end}`).join(', ');
-  return { ok: true, result: `Busy during: ${ranges}` };
+  // Suggest next available slots (simple 30-min step search)
+  const durMin = Number(args?.duration_minutes ?? 30);
+  const stepMin = 30;
+  const startMs = new Date(start).getTime();
+  const windowEndMs = startMs + 8 * 60 * 60 * 1000; // search next 8 hours
+  const busyMs = busy
+    .map((b) => ({ s: new Date(b.start).getTime(), e: new Date(b.end).getTime() }))
+    .filter((b) => Number.isFinite(b.s) && Number.isFinite(b.e));
+
+  function overlaps(s: number, e: number) {
+    return busyMs.some((b) => s < b.e && e > b.s);
+  }
+
+  const suggestions: string[] = [];
+  for (let t = startMs; t < windowEndMs && suggestions.length < 3; t += stepMin * 60 * 1000) {
+    const s = t;
+    const e = t + durMin * 60 * 1000;
+    if (!overlaps(s, e)) suggestions.push(new Date(s).toISOString());
+  }
+
+  const ranges = busy.slice(0, 3).map((b) => `${b.start}-${b.end}`).join(', ');
+  if (suggestions.length) {
+    return { ok: true, result: `Not available. Busy: ${ranges}. Next available starts: ${suggestions.join(', ')}` };
+  }
+
+  return { ok: true, result: `Not available. Busy: ${ranges}. No alternative slots found in next 8 hours.` };
 }
 
 async function findBookingId(supabase: ReturnType<typeof getServiceClient>, tenantId: string, args: any) {
