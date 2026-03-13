@@ -147,7 +147,7 @@ async function bookingCreateDbOnly(supabase: ReturnType<typeof getServiceClient>
 
   if (error) return { ok: false, error: `DB insert failed: ${error.message}` };
 
-  return { ok: true, result: `Booking created (bookingId=${data.id}, status=pending_calendar)` };
+  return { ok: true, result: `Booking created (bookingId=${data.id}, start=${start}, end=${end}, status=pending_calendar)` };
 }
 
 async function bookingLookup(supabase: ReturnType<typeof getServiceClient>, tenantId: string, args: any) {
