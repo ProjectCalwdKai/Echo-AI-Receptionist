@@ -330,11 +330,24 @@ async function bookingLookup(supabase: ReturnType<typeof getServiceClient>, tena
 async function bookingCheckAvailabilityGoogle(supabase: ReturnType<typeof getServiceClient>, tenantId: string, args: any) {
   const timeZone = args?.timezone ?? 'Europe/London';
 
-  const start = args?.start_datetime ?? (args?.date ? `${args.date}T00:00:00` : null);
-  const end = args?.end_datetime ?? (args?.date ? `${args.date}T23:59:59` : null);
+  let start = args?.start_datetime ?? (args?.date ? `${args.date}T00:00:00Z` : null);
+  let end = args?.end_datetime ?? null;
+
+  // If caller gives a start time + duration, compute end.
+  if (!end && args?.start_datetime && args?.duration_minutes) {
+    const ms = Number(args.duration_minutes) * 60 * 1000;
+    const d = new Date(args.start_datetime);
+    end = new Date(d.getTime() + ms).toISOString();
+    start = d.toISOString();
+  }
+
+  // If only a date is given, check the whole day (UTC bounds) as a fallback.
+  if (!end && args?.date) {
+    end = `${args.date}T23:59:59Z`;
+  }
 
   if (!start || !end) {
-    return { ok: false, error: 'Missing required fields: provide start_datetime+end_datetime or date' };
+    return { ok: false, error: 'Missing required fields: provide start_datetime+end_datetime, or start_datetime+duration_minutes, or date' };
   }
 
   const accessToken = await getGoogleAccessToken(supabase, tenantId);
