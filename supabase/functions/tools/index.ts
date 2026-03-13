@@ -1,19 +1,22 @@
 // Supabase Edge Function: tools
-// Multi-tenant tool router for Vapi function calls.
-// Auth: Vapi Custom Credentials (Authorization: Bearer <token>).
+// Executes Vapi custom tools.
+// IMPORTANT: Vapi requires HTTP 200 with { results: [{ toolCallId, result|error }] }
+// where result/error are SINGLE-LINE STRINGS.
+// Ref: https://docs.vapi.ai/tools/custom-tools-troubleshooting#no-result-returned-error
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
 
 const SUPABASE_URL = "https://pmfvfggpaphwkdtvsndk.supabase.co";
 
-function json(status: number, body: unknown) {
-  return new Response(JSON.stringify(body), {
-    status,
+function respond(results: Array<{ toolCallId: string; result?: string; error?: string }>) {
+  return new Response(JSON.stringify({ results }), {
+    status: 200,
     headers: { "content-type": "application/json" },
   });
 }
 
 function unauthorized() {
+  // Even auth failures must be returned in results format when we have a toolCallId.
   return new Response("Unauthorized", { status: 401 });
 }
 
@@ -40,44 +43,18 @@ function pickFirst<T>(...vals: Array<T | undefined | null>): T | undefined {
   return undefined;
 }
 
-function extractContext(payload: any) {
-  const assistantId = pickFirst<string>(
+function normalizeName(name: string) {
+  return name.toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+function extractAssistantId(payload: any) {
+  return pickFirst<string>(
     payload?.assistantId,
     payload?.assistant?.id,
     payload?.call?.assistantId,
     payload?.message?.call?.assistantId,
     payload?.data?.assistantId,
   );
-
-  const callId = pickFirst<string>(
-    payload?.callId,
-    payload?.call?.id,
-    payload?.message?.call?.id,
-    payload?.data?.call?.id,
-    payload?.id,
-  );
-
-  // Vapi tool payloads commonly include function name + args/parameters in different shapes.
-  const toolName = pickFirst<string>(
-    payload?.toolName,
-    payload?.name,
-    payload?.functionName,
-    payload?.function?.name,
-    payload?.toolCall?.name,
-  );
-
-  const params = pickFirst<any>(
-    payload?.parameters,
-    payload?.args,
-    payload?.arguments,
-    payload?.function?.arguments,
-    payload?.toolCall?.parameters,
-    payload?.toolCall?.arguments,
-    payload?.payload,
-    payload,
-  );
-
-  return { assistantId, callId, toolName, params };
 }
 
 async function resolveTenantId(supabase: ReturnType<typeof getServiceClient>, assistantId?: string) {
@@ -91,40 +68,58 @@ async function resolveTenantId(supabase: ReturnType<typeof getServiceClient>, as
   return (data?.tenant_id as string | undefined) ?? undefined;
 }
 
-async function createCallbackLead(supabase: ReturnType<typeof getServiceClient>, tenantId: string, params: any) {
+async function logToolCall(supabase: ReturnType<typeof getServiceClient>, tenantId: string, tc: any, meta?: any) {
+  await supabase.from("tool_calls").insert({
+    tenant_id: tenantId,
+    vapi_call_id: meta?.callId ?? null,
+    assistant_id: meta?.assistantId ?? null,
+    tool_name: meta?.toolName ?? null,
+    payload: tc,
+  });
+}
+
+async function createCallbackLead(supabase: ReturnType<typeof getServiceClient>, tenantId: string, args: any) {
+  const phone = args?.phone ?? null;
+  const reason = args?.reason ?? null;
+  const preferred = args?.preferred_time_window ?? args?.preferred_time ?? null;
+
+  if (!phone || !reason) {
+    return { ok: false, error: "Missing required fields: phone, reason" };
+  }
+
   const lead = {
     tenant_id: tenantId,
-    name: params?.name ?? null,
-    phone: params?.phone ?? null,
-    email: params?.email ?? null,
-    reason: params?.reason ?? null,
-    urgency: params?.urgency ?? null,
-    preferred_time: params?.preferred_time_window ?? params?.preferred_time ?? null,
+    name: args?.name ?? null,
+    phone,
+    email: args?.email ?? null,
+    reason,
+    urgency: args?.urgency ?? null,
+    preferred_time: preferred,
     details_json: {
-      notes: params?.notes ?? null,
-      location_hint: params?.location_hint ?? null,
+      notes: args?.notes ?? null,
+      location_hint: args?.location_hint ?? null,
     },
   };
 
-  if (!lead.phone || !lead.reason) {
-    return json(400, { ok: false, error: "MISSING_REQUIRED_FIELDS", required: ["phone", "reason"] });
-  }
+  const { data, error } = await supabase
+    .from("leads")
+    .insert(lead)
+    .select("id")
+    .single();
 
-  const { data, error } = await supabase.from("leads").insert(lead).select("id, status, created_at").single();
-  if (error) throw error;
+  if (error) return { ok: false, error: `DB insert failed: ${error.message}` };
 
-  return json(200, { ok: true, leadId: data.id, status: data.status, createdAt: data.created_at });
+  return { ok: true, result: `Callback request saved (leadId=${data.id})` };
 }
 
-async function bookingCreateDbOnly(supabase: ReturnType<typeof getServiceClient>, tenantId: string, params: any) {
-  const customer = params?.customer ?? {};
-
-  const start = params?.start_datetime;
-  const end = params?.end_datetime;
+async function bookingCreateDbOnly(supabase: ReturnType<typeof getServiceClient>, tenantId: string, args: any) {
+  const customer = args?.customer ?? {};
+  const start = args?.start_datetime;
+  const end = args?.end_datetime;
   const phone = customer?.phone;
 
   if (!start || !end || !phone) {
-    return json(400, { ok: false, error: "MISSING_REQUIRED_FIELDS", required: ["start_datetime", "end_datetime", "customer.phone"] });
+    return { ok: false, error: "Missing required fields: start_datetime, end_datetime, customer.phone" };
   }
 
   const record = {
@@ -139,161 +134,105 @@ async function bookingCreateDbOnly(supabase: ReturnType<typeof getServiceClient>
     customer_name: customer?.name ?? null,
     customer_email: customer?.email ?? null,
     customer_json: customer,
-    status: 'pending_calendar',
+    status: "pending_calendar",
   };
 
   const { data, error } = await supabase
-    .from('bookings')
+    .from("bookings")
     .insert(record)
-    .select('id, status, start_at, end_at')
+    .select("id")
     .single();
-  if (error) throw error;
 
-  return json(200, { ok: true, bookingId: data.id, status: data.status, start_at: data.start_at, end_at: data.end_at });
+  if (error) return { ok: false, error: `DB insert failed: ${error.message}` };
+
+  return { ok: true, result: `Booking created (bookingId=${data.id}, status=pending_calendar)` };
 }
 
-async function bookingLookup(supabase: ReturnType<typeof getServiceClient>, tenantId: string, params: any) {
-  const phone = params?.phone;
-  if (!phone) return json(400, { ok: false, error: 'MISSING_REQUIRED_FIELDS', required: ['phone'] });
+async function bookingLookup(supabase: ReturnType<typeof getServiceClient>, tenantId: string, args: any) {
+  const phone = args?.phone;
+  if (!phone) return { ok: false, error: "Missing required field: phone" };
 
-  const fromDate = params?.from_date;
-  const toDate = params?.to_date;
-
-  let q = supabase
-    .from('bookings')
-    .select('id, start_at, end_at, status, customer_phone, customer_name, calendar_event_id')
-    .eq('tenant_id', tenantId)
-    .eq('customer_phone', phone)
-    .order('start_at', { ascending: false })
+  const { data, error } = await supabase
+    .from("bookings")
+    .select("id,start_at,end_at,status,customer_phone,customer_name")
+    .eq("tenant_id", tenantId)
+    .eq("customer_phone", phone)
+    .order("start_at", { ascending: false })
     .limit(5);
 
-  if (fromDate) q = q.gte('start_at', `${fromDate}T00:00:00Z`);
-  if (toDate) q = q.lte('start_at', `${toDate}T23:59:59Z`);
+  if (error) return { ok: false, error: `Lookup failed: ${error.message}` };
 
-  const { data, error } = await q;
-  if (error) throw error;
+  if (!data || data.length === 0) return { ok: true, result: "No bookings found for that phone number." };
 
-  return json(200, { ok: true, results: data ?? [] });
+  // Single-line summary
+  const summary = data
+    .map((b: any) => `bookingId=${b.id} start=${b.start_at} status=${b.status}`)
+    .join(" | ");
+
+  return { ok: true, result: summary };
 }
 
 Deno.serve(async (req) => {
   try {
-    if (req.method !== "POST") return json(405, { ok: false, error: "METHOD_NOT_ALLOWED" });
+    if (req.method !== "POST") {
+      // Not a tool call
+      return new Response("Method Not Allowed", { status: 405 });
+    }
     if (!checkAuth(req)) return unauthorized();
 
     const payload = await req.json();
-    const { assistantId, callId, toolName, params } = extractContext(payload);
+    const assistantId = extractAssistantId(payload);
 
     const supabase = getServiceClient();
     const tenantId = await resolveTenantId(supabase, assistantId);
 
-    if (!tenantId) {
-      return json(400, {
-        ok: false,
-        error: "TENANT_NOT_RESOLVED",
-        hint: "Ensure assistantId is present and mapped in vapi_assistants table.",
-        assistantId,
-        callId,
-        toolName,
-      });
+    const msg = payload?.message;
+    if (msg?.type !== "tool-calls" || !Array.isArray(msg?.toolCalls)) {
+      // If Vapi ever sends a different shape, return a generic "no-op" result.
+      return respond([{ toolCallId: "unknown", error: "Unsupported payload shape" }]);
     }
 
-    // If Vapi sends the "tool-calls" event shape here, execute tool calls from message.toolCalls.
-    const msg = payload?.message;
-    if (msg?.type === 'tool-calls' && Array.isArray(msg?.toolCalls)) {
-      // Log the raw event
-      await supabase.from('tool_calls').insert({
-        tenant_id: tenantId,
-        vapi_call_id: msg?.call?.id ?? callId ?? null,
-        assistant_id: msg?.call?.assistantId ?? assistantId ?? null,
-        tool_name: 'tool-calls',
-        payload,
+    if (!tenantId) {
+      // Return errors for all tool calls
+      return respond(
+        msg.toolCalls.map((tc: any) => ({
+          toolCallId: tc?.id ?? "unknown",
+          error: "Tenant not resolved for assistantId",
+        }))
+      );
+    }
+
+    const results: Array<{ toolCallId: string; result?: string; error?: string }> = [];
+
+    for (const tc of msg.toolCalls) {
+      const toolCallId = tc?.id ?? "unknown";
+      const fn = tc?.function;
+      const rawName = fn?.name ?? "";
+      const name = normalizeName(rawName);
+      const args = fn?.arguments ?? {};
+
+      await logToolCall(supabase, tenantId, tc, {
+        callId: msg?.call?.id ?? null,
+        assistantId: msg?.call?.assistantId ?? assistantId ?? null,
+        toolName: rawName,
       });
 
-      for (const tc of msg.toolCalls) {
-        const fn = tc?.function;
-        const name = (fn?.name ?? '').toLowerCase().replace(/[^a-z0-9]/g, '');
-        const args = fn?.arguments ?? {};
-
-        // Log each tool call
-        await supabase.from('tool_calls').insert({
-          tenant_id: tenantId,
-          vapi_call_id: msg?.call?.id ?? callId ?? null,
-          assistant_id: msg?.call?.assistantId ?? assistantId ?? null,
-          tool_name: fn?.name ?? null,
-          payload: tc,
-        });
-
-        if (name === 'leadcreatecallbackrequest') {
-          // Use same validator/insert path
-          const resp = await createCallbackLead(supabase, tenantId, args);
-          if (resp.status >= 400) return resp;
-          continue;
-        }
-
-        // Recognize other tools so we never hit "unrecognized" issues again.
-        if (name === 'bookingcreate') {
-          const resp = await bookingCreateDbOnly(supabase, tenantId, args);
-          if (resp.status >= 400) return resp;
-          continue;
-        }
-
-        if (name === 'bookinglookup') {
-          const resp = await bookingLookup(supabase, tenantId, args);
-          if (resp.status >= 400) return resp;
-          continue;
-        }
-
-        if (
-          name === 'bookingcheckavailability' ||
-          name === 'bookingreschedule' ||
-          name === 'bookingcancel' ||
-          name === 'messagesendsms'
-        ) {
-          return json(501, { ok: false, error: 'NOT_IMPLEMENTED', toolName: fn?.name ?? null });
-        }
+      let r: any;
+      if (name === "leadcreatecallbackrequest") r = await createCallbackLead(supabase, tenantId, args);
+      else if (name === "bookingcreate") r = await bookingCreateDbOnly(supabase, tenantId, args);
+      else if (name === "bookinglookup") r = await bookingLookup(supabase, tenantId, args);
+      else {
+        r = { ok: false, error: `Tool not implemented: ${rawName}` };
       }
 
-      return json(200, { ok: true });
+      if (r.ok) results.push({ toolCallId, result: String(r.result).replace(/\r?\n/g, " ") });
+      else results.push({ toolCallId, error: String(r.error).replace(/\r?\n/g, " ") });
     }
 
-    // Log every inbound tool call for debugging/audit (non tool-calls event shapes)
-    await supabase.from('tool_calls').insert({
-      tenant_id: tenantId,
-      vapi_call_id: callId ?? null,
-      assistant_id: assistantId ?? null,
-      tool_name: toolName ?? null,
-      payload,
-    });
-
-    // Normalize tool names (Vapi tool names often can't include dots)
-    const key = (toolName ?? '').toLowerCase().replace(/[^a-z0-9]/g, '');
-
-    // Route
-    switch (key) {
-      case "leadcreatecallbackrequest":
-      case "leadcreatecallback":
-        return await createCallbackLead(supabase, tenantId, params);
-
-      // Booking tools
-      case "bookingcreate":
-        return await bookingCreateDbOnly(supabase, tenantId, params);
-      case "bookinglookup":
-        return await bookingLookup(supabase, tenantId, params);
-      case "bookingcheckavailability":
-      case "bookingreschedule":
-      case "bookingcancel":
-        return json(501, { ok: false, error: "NOT_IMPLEMENTED", toolName });
-
-      // message.sendSms
-      case "messagesendsms":
-        return json(501, { ok: false, error: "NOT_IMPLEMENTED", toolName });
-
-      default:
-        return json(400, { ok: false, error: "UNKNOWN_TOOL", toolName, assistantId, callId });
-    }
+    return respond(results);
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    return json(500, { ok: false, error: msg });
+    // Can't reliably know toolCallIds here, so return a generic one.
+    return respond([{ toolCallId: "unknown", error: msg.replace(/\r?\n/g, " ") }]);
   }
 });
