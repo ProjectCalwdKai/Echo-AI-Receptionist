@@ -116,6 +116,66 @@ async function createCallbackLead(supabase: ReturnType<typeof getServiceClient>,
   return json(200, { ok: true, leadId: data.id, status: data.status, createdAt: data.created_at });
 }
 
+async function bookingCreateDbOnly(supabase: ReturnType<typeof getServiceClient>, tenantId: string, params: any) {
+  const customer = params?.customer ?? {};
+
+  const start = params?.start_datetime;
+  const end = params?.end_datetime;
+  const phone = customer?.phone;
+
+  if (!start || !end || !phone) {
+    return json(400, { ok: false, error: "MISSING_REQUIRED_FIELDS", required: ["start_datetime", "end_datetime", "customer.phone"] });
+  }
+
+  const record = {
+    tenant_id: tenantId,
+    location_id: null,
+    start_at: start,
+    end_at: end,
+    calendar_provider: null,
+    calendar_id: null,
+    calendar_event_id: null,
+    customer_phone: phone,
+    customer_name: customer?.name ?? null,
+    customer_email: customer?.email ?? null,
+    customer_json: customer,
+    status: 'pending_calendar',
+  };
+
+  const { data, error } = await supabase
+    .from('bookings')
+    .insert(record)
+    .select('id, status, start_at, end_at')
+    .single();
+  if (error) throw error;
+
+  return json(200, { ok: true, bookingId: data.id, status: data.status, start_at: data.start_at, end_at: data.end_at });
+}
+
+async function bookingLookup(supabase: ReturnType<typeof getServiceClient>, tenantId: string, params: any) {
+  const phone = params?.phone;
+  if (!phone) return json(400, { ok: false, error: 'MISSING_REQUIRED_FIELDS', required: ['phone'] });
+
+  const fromDate = params?.from_date;
+  const toDate = params?.to_date;
+
+  let q = supabase
+    .from('bookings')
+    .select('id, start_at, end_at, status, customer_phone, customer_name, calendar_event_id')
+    .eq('tenant_id', tenantId)
+    .eq('customer_phone', phone)
+    .order('start_at', { ascending: false })
+    .limit(5);
+
+  if (fromDate) q = q.gte('start_at', `${fromDate}T00:00:00Z`);
+  if (toDate) q = q.lte('start_at', `${toDate}T23:59:59Z`);
+
+  const { data, error } = await q;
+  if (error) throw error;
+
+  return json(200, { ok: true, results: data ?? [] });
+}
+
 Deno.serve(async (req) => {
   try {
     if (req.method !== "POST") return json(405, { ok: false, error: "METHOD_NOT_ALLOWED" });
@@ -172,10 +232,20 @@ Deno.serve(async (req) => {
         }
 
         // Recognize other tools so we never hit "unrecognized" issues again.
+        if (name === 'bookingcreate') {
+          const resp = await bookingCreateDbOnly(supabase, tenantId, args);
+          if (resp.status >= 400) return resp;
+          continue;
+        }
+
+        if (name === 'bookinglookup') {
+          const resp = await bookingLookup(supabase, tenantId, args);
+          if (resp.status >= 400) return resp;
+          continue;
+        }
+
         if (
           name === 'bookingcheckavailability' ||
-          name === 'bookingcreate' ||
-          name === 'bookinglookup' ||
           name === 'bookingreschedule' ||
           name === 'bookingcancel' ||
           name === 'messagesendsms'
@@ -205,10 +275,12 @@ Deno.serve(async (req) => {
       case "leadcreatecallback":
         return await createCallbackLead(supabase, tenantId, params);
 
-      // Booking tools (stub for now)
-      case "bookingcheckavailability":
+      // Booking tools
       case "bookingcreate":
+        return await bookingCreateDbOnly(supabase, tenantId, params);
       case "bookinglookup":
+        return await bookingLookup(supabase, tenantId, params);
+      case "bookingcheckavailability":
       case "bookingreschedule":
       case "bookingcancel":
         return json(501, { ok: false, error: "NOT_IMPLEMENTED", toolName });
