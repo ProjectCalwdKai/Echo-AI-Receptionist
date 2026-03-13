@@ -1,0 +1,10 @@
+{
+  "name": "echo-ai-receptionist",
+  "private": true,
+  "packageManager": "pnpm@9.15.5",
+  "scripts": {
+    "dev:web": "pnpm -C apps/web dev",
+    "build:web": "pnpm -C apps/web build",
+    "lint:web": "pnpm -C apps/web lint"
+  }
+}
