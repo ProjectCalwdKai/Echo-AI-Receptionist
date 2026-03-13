@@ -1,14 +1,16 @@
 // Supabase Edge Function: vapi-webhook
 // Receives Vapi call lifecycle events and stores them in Postgres.
-// TODO: verify webhook signature, map assistant/number -> tenant, upsert calls + usage rollups.
+// Auth: Vapi Custom Credentials (Authorization: Bearer <token>).
+
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
+
+const SUPABASE_URL = "https://pmfvfggpaphwkdtvsndk.supabase.co";
 
 function unauthorized() {
   return new Response('Unauthorized', { status: 401 });
 }
 
 function checkAuth(req: Request): boolean {
-  // Vapi recommends using Custom Credentials + credentialId.
-  // We expect: Authorization: Bearer <token>
   const expected = Deno.env.get('VAPI_SERVER_BEARER_TOKEN');
   if (!expected) return true; // allow if not configured yet
 
@@ -17,14 +19,120 @@ function checkAuth(req: Request): boolean {
   return !!m && m[1] === expected;
 }
 
-Deno.serve(async (req) => {
-  if (req.method !== 'POST') return new Response('Method Not Allowed', { status: 405 });
-  if (!checkAuth(req)) return unauthorized();
-
-  const body = await req.json().catch(() => null);
-
-  // TODO: verify payload shape, map assistant/number -> tenant, upsert calls + usage rollups.
-  return new Response(JSON.stringify({ ok: true, received: body ? true : false }), {
-    headers: { 'content-type': 'application/json' },
+function getServiceClient() {
+  const key = Deno.env.get('SERVICE_ROLE_KEY');
+  if (!key) throw new Error('SERVICE_ROLE_KEY not set');
+  return createClient(SUPABASE_URL, key, {
+    auth: { persistSession: false },
+    global: { headers: { 'X-Client-Info': 'echo-ai-receptionist/vapi-webhook' } },
   });
+}
+
+function pickFirst<T>(...vals: Array<T | undefined | null>): T | undefined {
+  for (const v of vals) if (v !== undefined && v !== null) return v as T;
+  return undefined;
+}
+
+function extractIds(payload: any) {
+  const vapiCallId = pickFirst<string>(
+    payload?.call?.id,
+    payload?.callId,
+    payload?.id,
+  );
+
+  const vapiAssistantId = pickFirst<string>(
+    payload?.assistant?.id,
+    payload?.assistantId,
+    payload?.call?.assistantId,
+  );
+
+  const vapiPhoneNumberId = pickFirst<string>(
+    payload?.phoneNumber?.id,
+    payload?.phoneNumberId,
+    payload?.call?.phoneNumberId,
+  );
+
+  return { vapiCallId, vapiAssistantId, vapiPhoneNumberId };
+}
+
+async function getOrCreateTenantForAssistant(supabase: ReturnType<typeof getServiceClient>, vapiAssistantId: string) {
+  // 1) Try existing mapping
+  const { data: existing, error: existingErr } = await supabase
+    .from('vapi_assistants')
+    .select('tenant_id')
+    .eq('vapi_assistant_id', vapiAssistantId)
+    .maybeSingle();
+
+  if (existingErr) throw existingErr;
+  if (existing?.tenant_id) return existing.tenant_id as string;
+
+  // 2) Auto-provision a tenant for new assistant IDs (good for early testing)
+  const { data: tenant, error: tenantErr } = await supabase
+    .from('tenants')
+    .insert({ name: `Tenant for ${vapiAssistantId}`, template_key: 'general' })
+    .select('id')
+    .single();
+  if (tenantErr) throw tenantErr;
+
+  const tenantId = tenant.id as string;
+
+  const { error: mapErr } = await supabase
+    .from('vapi_assistants')
+    .insert({ tenant_id: tenantId, vapi_assistant_id: vapiAssistantId, name: `Assistant ${vapiAssistantId}` });
+  if (mapErr) throw mapErr;
+
+  return tenantId;
+}
+
+Deno.serve(async (req) => {
+  try {
+    if (req.method !== 'POST') return new Response('Method Not Allowed', { status: 405 });
+    if (!checkAuth(req)) return unauthorized();
+
+    const payload = await req.json();
+    const { vapiCallId, vapiAssistantId, vapiPhoneNumberId } = extractIds(payload);
+
+    if (!vapiCallId) {
+      return new Response(JSON.stringify({ ok: false, error: 'MISSING_CALL_ID' }), {
+        status: 400,
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+
+    const supabase = getServiceClient();
+
+    if (!vapiAssistantId) {
+      return new Response(JSON.stringify({ ok: false, error: 'MISSING_ASSISTANT_ID' }), {
+        status: 400,
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+
+    const tenantId = await getOrCreateTenantForAssistant(supabase, vapiAssistantId);
+
+    // Upsert call with raw transcript payload stored in jsonb.
+    const now = new Date().toISOString();
+    const { error: upsertErr } = await supabase
+      .from('calls')
+      .upsert({
+        tenant_id: tenantId,
+        vapi_call_id: vapiCallId,
+        vapi_assistant_id: vapiAssistantId,
+        vapi_phone_number_id: vapiPhoneNumberId ?? null,
+        transcript: payload,
+        created_at: now,
+      }, { onConflict: 'vapi_call_id' });
+
+    if (upsertErr) throw upsertErr;
+
+    return new Response(JSON.stringify({ ok: true }), {
+      headers: { 'content-type': 'application/json' },
+    });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return new Response(JSON.stringify({ ok: false, error: msg }), {
+      status: 500,
+      headers: { 'content-type': 'application/json' },
+    });
+  }
 });
