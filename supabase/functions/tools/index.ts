@@ -327,6 +327,46 @@ async function bookingLookup(supabase: ReturnType<typeof getServiceClient>, tena
   return { ok: true, result: summary };
 }
 
+async function bookingCheckAvailabilityGoogle(supabase: ReturnType<typeof getServiceClient>, tenantId: string, args: any) {
+  const timeZone = args?.timezone ?? 'Europe/London';
+
+  const start = args?.start_datetime ?? (args?.date ? `${args.date}T00:00:00` : null);
+  const end = args?.end_datetime ?? (args?.date ? `${args.date}T23:59:59` : null);
+
+  if (!start || !end) {
+    return { ok: false, error: 'Missing required fields: provide start_datetime+end_datetime or date' };
+  }
+
+  const accessToken = await getGoogleAccessToken(supabase, tenantId);
+  const calendarId = await getGoogleCalendarId(supabase, tenantId);
+
+  const r = await fetch('https://www.googleapis.com/calendar/v3/freeBusy', {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      Authorization: `Bearer ${accessToken}`,
+    },
+    body: JSON.stringify({
+      timeMin: start,
+      timeMax: end,
+      timeZone,
+      items: [{ id: calendarId }],
+    }),
+  });
+
+  const j = await r.json();
+  if (!r.ok) return { ok: false, error: `Google freeBusy failed: ${JSON.stringify(j)}` };
+
+  const busy: Array<{ start: string; end: string }> = j?.calendars?.[calendarId]?.busy ?? [];
+
+  if (!busy.length) {
+    return { ok: true, result: `Available between ${start} and ${end} (${timeZone})` };
+  }
+
+  const ranges = busy.slice(0, 5).map((b) => `${b.start}-${b.end}`).join(', ');
+  return { ok: true, result: `Busy during: ${ranges}` };
+}
+
 async function findBookingId(supabase: ReturnType<typeof getServiceClient>, tenantId: string, args: any) {
   const bookingId = args?.booking_id ?? null;
   if (bookingId) return bookingId as string;
@@ -479,6 +519,7 @@ Deno.serve(async (req) => {
       if (name === "leadcreatecallbackrequest") r = await createCallbackLead(supabase, tenantId, args);
       else if (name === "bookingcreate") r = await bookingCreateDbOnly(supabase, tenantId, args);
       else if (name === "bookinglookup") r = await bookingLookup(supabase, tenantId, args);
+      else if (name === "bookingcheckavailability") r = await bookingCheckAvailabilityGoogle(supabase, tenantId, args);
       else if (name === "bookingcancel") r = await bookingCancelDbOnly(supabase, tenantId, args);
       else if (name === "bookingreschedule") r = await bookingRescheduleDbOnly(supabase, tenantId, args);
       else {
