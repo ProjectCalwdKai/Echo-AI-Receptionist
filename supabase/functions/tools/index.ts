@@ -147,20 +147,26 @@ Deno.serve(async (req) => {
       payload,
     });
 
+    // Normalize tool names (Vapi tool names often can't include dots)
+    const key = (toolName ?? '').toLowerCase().replace(/[^a-z0-9]/g, '');
+
     // Route
-    switch (toolName) {
-      case "lead.createCallbackRequest":
+    switch (key) {
+      // lead.createCallbackRequest
+      case "leadcreatecallbackrequest":
+      case "leadcreatecallback":
         return await createCallbackLead(supabase, tenantId, params);
 
       // Booking tools (stub for now)
-      case "booking.checkAvailability":
-      case "booking.create":
-      case "booking.lookup":
-      case "booking.reschedule":
-      case "booking.cancel":
+      case "bookingcheckavailability":
+      case "bookingcreate":
+      case "bookinglookup":
+      case "bookingreschedule":
+      case "bookingcancel":
         return json(501, { ok: false, error: "NOT_IMPLEMENTED", toolName });
 
-      case "message.sendSms":
+      // message.sendSms
+      case "messagesendsms":
         return json(501, { ok: false, error: "NOT_IMPLEMENTED", toolName });
 
       default:
