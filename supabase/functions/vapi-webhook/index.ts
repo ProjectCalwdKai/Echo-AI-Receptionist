@@ -34,22 +34,32 @@ function pickFirst<T>(...vals: Array<T | undefined | null>): T | undefined {
 }
 
 function extractIds(payload: any) {
+  // Vapi payloads can vary by event type; we try a few common shapes.
   const vapiCallId = pickFirst<string>(
     payload?.call?.id,
+    payload?.call?.callId,
+    payload?.message?.call?.id,
+    payload?.data?.call?.id,
     payload?.callId,
     payload?.id,
   );
 
   const vapiAssistantId = pickFirst<string>(
     payload?.assistant?.id,
+    payload?.message?.assistant?.id,
     payload?.assistantId,
     payload?.call?.assistantId,
+    payload?.message?.call?.assistantId,
+    payload?.data?.assistantId,
   );
 
   const vapiPhoneNumberId = pickFirst<string>(
     payload?.phoneNumber?.id,
+    payload?.message?.phoneNumber?.id,
     payload?.phoneNumberId,
     payload?.call?.phoneNumberId,
+    payload?.message?.call?.phoneNumberId,
+    payload?.data?.phoneNumberId,
   );
 
   return { vapiCallId, vapiAssistantId, vapiPhoneNumberId };
