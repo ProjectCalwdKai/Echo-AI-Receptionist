@@ -167,8 +167,20 @@ Deno.serve(async (req) => {
         if (name === 'leadcreatecallbackrequest') {
           // Use same validator/insert path
           const resp = await createCallbackLead(supabase, tenantId, args);
-          // If it failed, bubble an error to Vapi
           if (resp.status >= 400) return resp;
+          continue;
+        }
+
+        // Recognize other tools so we never hit "unrecognized" issues again.
+        if (
+          name === 'bookingcheckavailability' ||
+          name === 'bookingcreate' ||
+          name === 'bookinglookup' ||
+          name === 'bookingreschedule' ||
+          name === 'bookingcancel' ||
+          name === 'messagesendsms'
+        ) {
+          return json(501, { ok: false, error: 'NOT_IMPLEMENTED', toolName: fn?.name ?? null });
         }
       }
 
