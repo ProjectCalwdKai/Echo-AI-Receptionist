@@ -262,6 +262,16 @@ async function bookingCreateDbOnly(supabase: ReturnType<typeof getServiceClient>
   const timeZone = args?.timezone ?? 'Europe/London';
   const summary = args?.service_name ?? 'Appointment';
 
+  // Guardrail: prevent obviously wrong dates (e.g. far in the past).
+  const startMs = new Date(start).getTime();
+  const nowMs = Date.now();
+  if (!Number.isFinite(startMs)) {
+    return { ok: false, error: 'Invalid start_datetime format. Must be ISO 8601.' };
+  }
+  if (startMs < nowMs - 24 * 60 * 60 * 1000) {
+    return { ok: false, error: 'Requested start time appears to be in the past. Please confirm the date.' };
+  }
+
   // Google Calendar mirroring
   const accessToken = await getGoogleAccessToken(supabase, tenantId);
   const calendarId = await getGoogleCalendarId(supabase, tenantId);
