@@ -138,7 +138,44 @@ Deno.serve(async (req) => {
       });
     }
 
-    // Log every inbound tool call for debugging/audit
+    // If Vapi sends the "tool-calls" event shape here, execute tool calls from message.toolCalls.
+    const msg = payload?.message;
+    if (msg?.type === 'tool-calls' && Array.isArray(msg?.toolCalls)) {
+      // Log the raw event
+      await supabase.from('tool_calls').insert({
+        tenant_id: tenantId,
+        vapi_call_id: msg?.call?.id ?? callId ?? null,
+        assistant_id: msg?.call?.assistantId ?? assistantId ?? null,
+        tool_name: 'tool-calls',
+        payload,
+      });
+
+      for (const tc of msg.toolCalls) {
+        const fn = tc?.function;
+        const name = (fn?.name ?? '').toLowerCase().replace(/[^a-z0-9]/g, '');
+        const args = fn?.arguments ?? {};
+
+        // Log each tool call
+        await supabase.from('tool_calls').insert({
+          tenant_id: tenantId,
+          vapi_call_id: msg?.call?.id ?? callId ?? null,
+          assistant_id: msg?.call?.assistantId ?? assistantId ?? null,
+          tool_name: fn?.name ?? null,
+          payload: tc,
+        });
+
+        if (name === 'leadcreatecallbackrequest') {
+          // Use same validator/insert path
+          const resp = await createCallbackLead(supabase, tenantId, args);
+          // If it failed, bubble an error to Vapi
+          if (resp.status >= 400) return resp;
+        }
+      }
+
+      return json(200, { ok: true });
+    }
+
+    // Log every inbound tool call for debugging/audit (non tool-calls event shapes)
     await supabase.from('tool_calls').insert({
       tenant_id: tenantId,
       vapi_call_id: callId ?? null,
@@ -152,7 +189,6 @@ Deno.serve(async (req) => {
 
     // Route
     switch (key) {
-      // lead.createCallbackRequest
       case "leadcreatecallbackrequest":
       case "leadcreatecallback":
         return await createCallbackLead(supabase, tenantId, params);
