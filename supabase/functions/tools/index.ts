@@ -174,6 +174,79 @@ async function bookingLookup(supabase: ReturnType<typeof getServiceClient>, tena
   return { ok: true, result: summary };
 }
 
+async function findBookingId(supabase: ReturnType<typeof getServiceClient>, tenantId: string, args: any) {
+  const bookingId = args?.booking_id ?? null;
+  if (bookingId) return bookingId as string;
+
+  const lookup = args?.lookup ?? {};
+  const phone = lookup?.phone ?? args?.phone ?? null;
+  const approxDate = lookup?.approx_date ?? null;
+
+  if (!phone) return null;
+
+  let q = supabase
+    .from('bookings')
+    .select('id,start_at')
+    .eq('tenant_id', tenantId)
+    .eq('customer_phone', phone)
+    .order('start_at', { ascending: false })
+    .limit(1);
+
+  if (approxDate) {
+    q = q.gte('start_at', `${approxDate}T00:00:00Z`).lte('start_at', `${approxDate}T23:59:59Z`);
+  }
+
+  const { data, error } = await q;
+  if (error) throw error;
+  return data?.[0]?.id ?? null;
+}
+
+async function bookingCancelDbOnly(supabase: ReturnType<typeof getServiceClient>, tenantId: string, args: any) {
+  const id = await findBookingId(supabase, tenantId, args);
+  if (!id) return { ok: false, error: 'Could not find booking to cancel. Ask for phone number and approximate date.' };
+
+  const { error } = await supabase
+    .from('bookings')
+    .update({ status: 'cancelled' })
+    .eq('tenant_id', tenantId)
+    .eq('id', id);
+
+  if (error) return { ok: false, error: `Cancel failed: ${error.message}` };
+
+  return { ok: true, result: `Booking cancelled (bookingId=${id})` };
+}
+
+async function bookingRescheduleDbOnly(supabase: ReturnType<typeof getServiceClient>, tenantId: string, args: any) {
+  const id = await findBookingId(supabase, tenantId, args);
+  if (!id) return { ok: false, error: 'Could not find booking to reschedule. Ask for phone number and approximate date.' };
+
+  const newStart = args?.new_start_datetime;
+  const newEnd = args?.new_end_datetime;
+  if (!newStart || !newEnd) return { ok: false, error: 'Missing required fields: new_start_datetime, new_end_datetime' };
+
+  const reason = args?.reason ?? null;
+
+  const { data: existing, error: exErr } = await supabase
+    .from('bookings')
+    .select('notes')
+    .eq('tenant_id', tenantId)
+    .eq('id', id)
+    .maybeSingle();
+  if (exErr) throw exErr;
+
+  const notes = [existing?.notes, reason ? `Reschedule reason: ${reason}` : null].filter(Boolean).join(' | ') || null;
+
+  const { error } = await supabase
+    .from('bookings')
+    .update({ start_at: newStart, end_at: newEnd, status: 'rescheduled', notes })
+    .eq('tenant_id', tenantId)
+    .eq('id', id);
+
+  if (error) return { ok: false, error: `Reschedule failed: ${error.message}` };
+
+  return { ok: true, result: `Booking rescheduled (bookingId=${id} newStart=${newStart})` };
+}
+
 Deno.serve(async (req) => {
   try {
     if (req.method !== "POST") {
@@ -223,6 +296,8 @@ Deno.serve(async (req) => {
       if (name === "leadcreatecallbackrequest") r = await createCallbackLead(supabase, tenantId, args);
       else if (name === "bookingcreate") r = await bookingCreateDbOnly(supabase, tenantId, args);
       else if (name === "bookinglookup") r = await bookingLookup(supabase, tenantId, args);
+      else if (name === "bookingcancel") r = await bookingCancelDbOnly(supabase, tenantId, args);
+      else if (name === "bookingreschedule") r = await bookingRescheduleDbOnly(supabase, tenantId, args);
       else {
         r = { ok: false, error: `Tool not implemented: ${rawName}` };
       }
