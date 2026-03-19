@@ -5,7 +5,6 @@ import { useEffect, useState } from 'react';
 type Lead = {
   id: string;
   created_at: string;
-  tenant_id: string;
   name: string | null;
   phone: string | null;
   email: string | null;
@@ -13,6 +12,9 @@ type Lead = {
   urgency: string | null;
   preferred_time: string | null;
   status: string;
+  tenants?: {
+    name: string | null;
+  } | null;
 };
 
 export default function LeadsPage() {
@@ -37,7 +39,7 @@ export default function LeadsPage() {
         <table style={{ width: '100%', borderCollapse: 'collapse' }}>
           <thead>
             <tr>
-              {['created_at','phone','name','reason','preferred_time','urgency','status','tenant_id'].map((h) => (
+              {['created_at','phone','name','reason','preferred_time','urgency','status','tenant_name'].map((h) => (
                 <th key={h} style={{ textAlign: 'left', borderBottom: '1px solid #ddd', padding: '8px 6px' }}>{h}</th>
               ))}
             </tr>
@@ -52,7 +54,7 @@ export default function LeadsPage() {
                 <td style={{ borderBottom: '1px solid #f0f0f0', padding: '8px 6px' }}>{r.preferred_time}</td>
                 <td style={{ borderBottom: '1px solid #f0f0f0', padding: '8px 6px' }}>{r.urgency}</td>
                 <td style={{ borderBottom: '1px solid #f0f0f0', padding: '8px 6px' }}>{r.status}</td>
-                <td style={{ borderBottom: '1px solid #f0f0f0', padding: '8px 6px', fontFamily: 'monospace', fontSize: 12 }}>{r.tenant_id}</td>
+                <td style={{ borderBottom: '1px solid #f0f0f0', padding: '8px 6px' }}>{r.tenants?.name ?? '—'}</td>
               </tr>
             ))}
           </tbody>

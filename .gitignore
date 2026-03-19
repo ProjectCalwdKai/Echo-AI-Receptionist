@@ -1,0 +1,31 @@
+# dependencies
+node_modules/
+
+# env
+.env
+.env.*
+!.env.example
+apps/web/.env.local
+
+# next.js
+.next/
+out/
+apps/web/.next/
+
+# build artifacts
+build/
+coverage/
+*.tsbuildinfo
+
+# logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# local platform files
+.DS_Store
+.vercel/
+
+# Supabase local temp
+supabase/.temp/

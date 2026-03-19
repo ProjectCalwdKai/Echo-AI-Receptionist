@@ -8,7 +8,7 @@ export async function GET() {
 
   const { data, error } = await supabase
     .from('leads')
-    .select('id, created_at, tenant_id, name, phone, email, reason, urgency, preferred_time, status')
+    .select('id, created_at, name, phone, email, reason, urgency, preferred_time, status, tenants(name)')
     .order('created_at', { ascending: false })
     .limit(200);
 
