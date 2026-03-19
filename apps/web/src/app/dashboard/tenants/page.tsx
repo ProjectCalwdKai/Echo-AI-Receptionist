@@ -2,6 +2,15 @@
 
 import { useEffect, useMemo, useState } from 'react';
 
+type MembershipVapiAssistant = {
+  tenant_id: string;
+  vapi_assistant_id: string;
+  name: string | null;
+  last_published_at: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
 type MembershipTenant = {
   id: string;
   name: string;
@@ -11,6 +20,7 @@ type MembershipTenant = {
   status: string;
   created_at: string;
   updated_at: string;
+  vapi_assistants?: MembershipVapiAssistant | MembershipVapiAssistant[] | null;
 };
 
 type Membership = {
@@ -41,6 +51,17 @@ type AdminInfoResponse = {
 
 function getTenant(membership: Membership) {
   return Array.isArray(membership.tenants) ? membership.tenants[0] ?? null : membership.tenants;
+}
+
+function getVapiAssistant(membership: Membership) {
+  const tenant = getTenant(membership);
+  const assistant = tenant?.vapi_assistants;
+  return Array.isArray(assistant) ? assistant[0] ?? null : assistant ?? null;
+}
+
+function formatPublishedAt(value: string | null) {
+  if (!value) return 'Not published yet';
+  return `Published ${new Date(value).toLocaleString()}`;
 }
 
 export default function TenantMembershipsPage() {
@@ -124,7 +145,7 @@ export default function TenantMembershipsPage() {
       <section>
         <h1 style={{ fontSize: 24, fontWeight: 700 }}>Tenant access</h1>
         <p style={{ marginTop: 8, opacity: 0.8, maxWidth: 760 }}>
-          See which tenants your account can access and what role you hold in each workspace.
+          See which tenants your account can access, what role you hold in each workspace, and which Vapi assistant is linked.
         </p>
         {user ? (
           <p style={{ marginTop: 12, fontSize: 14, opacity: 0.75 }}>
@@ -136,45 +157,49 @@ export default function TenantMembershipsPage() {
         {error ? <p style={{ color: 'crimson', marginTop: 12 }}>{error}</p> : null}
       </section>
 
-      <section style={{ overflowX: 'auto' }}>
-        <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-          <thead>
-            <tr>
-              {['tenant', 'role', 'status', 'template', 'timezone', 'currency', 'tenant_id'].map((heading) => (
-                <th key={heading} style={{ textAlign: 'left', borderBottom: '1px solid #ddd', padding: '8px 6px' }}>
-                  {heading}
-                </th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {rows.length === 0 ? (
-              <tr>
-                <td colSpan={7} style={{ padding: '14px 6px', opacity: 0.7 }}>
-                  No tenant memberships found for this user.
-                </td>
-              </tr>
-            ) : (
-              rows.map((row) => {
-                const tenant = getTenant(row);
+      <section style={{ display: 'grid', gap: 16 }}>
+        {rows.length === 0 ? (
+          <div style={{ border: '1px solid #e5e7eb', borderRadius: 12, padding: 16, opacity: 0.7 }}>No tenant memberships found for this user.</div>
+        ) : (
+          rows.map((row) => {
+            const tenant = getTenant(row);
+            const assistant = getVapiAssistant(row);
 
-                return (
-                  <tr key={`${row.tenant_id}:${row.user_id}`}>
-                    <td style={{ borderBottom: '1px solid #f0f0f0', padding: '8px 6px' }}>{tenant?.name ?? '—'}</td>
-                    <td style={{ borderBottom: '1px solid #f0f0f0', padding: '8px 6px' }}>{row.role}</td>
-                    <td style={{ borderBottom: '1px solid #f0f0f0', padding: '8px 6px' }}>{tenant?.status ?? '—'}</td>
-                    <td style={{ borderBottom: '1px solid #f0f0f0', padding: '8px 6px' }}>{tenant?.template_key ?? '—'}</td>
-                    <td style={{ borderBottom: '1px solid #f0f0f0', padding: '8px 6px' }}>{tenant?.timezone ?? '—'}</td>
-                    <td style={{ borderBottom: '1px solid #f0f0f0', padding: '8px 6px' }}>{tenant?.currency ?? '—'}</td>
-                    <td style={{ borderBottom: '1px solid #f0f0f0', padding: '8px 6px', fontFamily: 'monospace', fontSize: 12 }}>
-                      {row.tenant_id}
-                    </td>
-                  </tr>
-                );
-              })
-            )}
-          </tbody>
-        </table>
+            return (
+              <article
+                key={`${row.tenant_id}:${row.user_id}`}
+                style={{ border: '1px solid #e5e7eb', borderRadius: 12, padding: 16, display: 'grid', gap: 16 }}
+              >
+                <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap', alignItems: 'flex-start' }}>
+                  <div>
+                    <h2 style={{ fontSize: 18, fontWeight: 700 }}>{tenant?.name ?? 'Unnamed tenant'}</h2>
+                    <p style={{ marginTop: 6, opacity: 0.72 }}>Role: {row.role}</p>
+                  </div>
+                  <div style={{ textAlign: 'right' }}>
+                    <div style={{ fontSize: 12, opacity: 0.7 }}>Tenant status</div>
+                    <div style={{ marginTop: 4 }}>{tenant?.status ?? '—'}</div>
+                  </div>
+                </div>
+
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 12 }}>
+                  {[
+                    ['Template', tenant?.template_key ?? '—'],
+                    ['Timezone', tenant?.timezone ?? '—'],
+                    ['Currency', tenant?.currency ?? '—'],
+                    ['Tenant ID', row.tenant_id],
+                    ['Vapi assistant ID', assistant?.vapi_assistant_id ?? '—'],
+                    ['Publish status', formatPublishedAt(assistant?.last_published_at ?? null)],
+                  ].map(([label, value]) => (
+                    <div key={label}>
+                      <div style={{ fontSize: 12, opacity: 0.7 }}>{label}</div>
+                      <div style={{ marginTop: 4, wordBreak: 'break-word', fontFamily: label.includes('ID') ? 'monospace' : 'inherit' }}>{value}</div>
+                    </div>
+                  ))}
+                </div>
+              </article>
+            );
+          })
+        )}
       </section>
 
       {canShowBootstrapForm ? (

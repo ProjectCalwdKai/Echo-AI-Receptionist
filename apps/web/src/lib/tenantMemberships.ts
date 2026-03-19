@@ -1,5 +1,14 @@
 import { supabaseAdmin } from './supabaseAdmin';
 
+export type MembershipVapiAssistant = {
+  tenant_id: string;
+  vapi_assistant_id: string;
+  name: string | null;
+  last_published_at: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
 export type MembershipTenant = {
   id: string;
   name: string;
@@ -9,6 +18,7 @@ export type MembershipTenant = {
   status: string;
   created_at: string;
   updated_at: string;
+  vapi_assistants?: MembershipVapiAssistant | MembershipVapiAssistant[] | null;
 };
 
 export type TenantMembership = {
@@ -35,7 +45,15 @@ export async function getUserTenantMemberships(userId: string) {
         currency,
         status,
         created_at,
-        updated_at
+        updated_at,
+        vapi_assistants (
+          tenant_id,
+          vapi_assistant_id,
+          name,
+          last_published_at,
+          created_at,
+          updated_at
+        )
       )
     `)
     .eq('user_id', userId)
@@ -53,6 +71,12 @@ export async function getTenantMembership(userId: string, tenantId: string) {
 
 export function getMembershipTenant(membership: TenantMembership) {
   return Array.isArray(membership.tenants) ? membership.tenants[0] ?? null : membership.tenants;
+}
+
+export function getMembershipVapiAssistant(membership: TenantMembership) {
+  const tenant = getMembershipTenant(membership);
+  const assistant = tenant?.vapi_assistants;
+  return Array.isArray(assistant) ? assistant[0] ?? null : assistant ?? null;
 }
 
 export function isTenantAdminRole(role: string | null | undefined) {

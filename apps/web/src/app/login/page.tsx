@@ -1,6 +1,7 @@
 'use client';
 
-import { useState } from 'react';
+import Link from 'next/link';
+import { useState, type FormEvent } from 'react';
 import { useRouter } from 'next/navigation';
 import { createSupabaseBrowserClient } from '../../lib/supabase/client';
 
@@ -16,7 +17,7 @@ export default function LoginPage() {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
-  async function onSubmit(e: React.FormEvent) {
+  async function onSubmit(e: FormEvent) {
     e.preventDefault();
     setLoading(true);
     setError(null);
@@ -54,6 +55,13 @@ export default function LoginPage() {
           {loading ? 'Signing in…' : 'Sign in'}
         </button>
       </form>
+
+      <p style={{ marginTop: 16, opacity: 0.8 }}>
+        New here?{' '}
+        <Link href="/signup" style={{ textDecoration: 'underline' }}>
+          Sign up your business
+        </Link>
+      </p>
     </main>
   );
 }
